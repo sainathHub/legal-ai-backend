@@ -18,11 +18,14 @@ services:
     startCommand: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/v1/health
     envVars:
-      # Link your Render Environment Group named 'prod'
-      - fromGroup: prod
-      # Default fallback values if not present in the group
-      - key: PORT
-        value: "10000"
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: WEAVIATE_URL
+        sync: false
+      - key: WEAVIATE_API_KEY
+        sync: false
       - key: ENVIRONMENT
         value: production
       - key: CORS_ORIGINS
