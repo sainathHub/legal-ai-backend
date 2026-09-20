@@ -1,4 +1,5 @@
 import os
+import re
 from typing import List, Union
 from pydantic import AnyHttpUrl, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -46,12 +47,18 @@ class Settings(BaseSettings):
     def assemble_database_url(cls, v: str) -> str:
         if not v:
             return "postgresql+asyncpg://postgres:postgres@localhost:5432/legal_ai_db"
-        # Render.com provides URLs starting with 'postgres://' or 'postgresql://'
-        # SQLAlchemy asyncpg requires 'postgresql+asyncpg://'
+        
+        v = v.strip()
+        # Convert standard URL schemes to asyncpg
         if v.startswith("postgres://"):
-            return v.replace("postgres://", "postgresql+asyncpg://", 1)
-        if v.startswith("postgresql://") and not v.startswith("postgresql+"):
-            return v.replace("postgresql://", "postgresql+asyncpg://", 1)
+            v = v.replace("postgres://", "postgresql+asyncpg://", 1)
+        elif v.startswith("postgresql://") and not v.startswith("postgresql+"):
+            v = v.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+        # Normalize parameters for asyncpg compatibility:
+        # asyncpg does not support channel_binding or sslmode parameters
+        v = re.sub(r'[?&]channel_binding=[^&]+', '', v)
+        v = v.replace("sslmode=", "ssl=")
         return v
 
     # Weaviate Vector Database
@@ -59,8 +66,19 @@ class Settings(BaseSettings):
     WEAVIATE_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
 
-    # Collection Name for Vector Storage
-    DEFAULT_VECTOR_COLLECTION: str = "LegalDocument"
+    @field_validator("WEAVIATE_URL", mode="before")
+    @classmethod
+    def assemble_weaviate_url(cls, v: str) -> str:
+        if not v:
+            return ""
+        v = v.strip()
+        if v and not v.startswith("http://") and not v.startswith("https://"):
+            v = f"https://{v}"
+        return v
+
+    # Collection Name for Vector Storage (matches user's Weaviate instance collection)
+    DEFAULT_VECTOR_COLLECTION: str = "LegalChunk"
+
 
 
 settings = Settings()

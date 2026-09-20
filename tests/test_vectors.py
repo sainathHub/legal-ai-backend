@@ -10,8 +10,8 @@ async def test_vector_status_endpoint(client: AsyncClient):
     assert response.status_code == 200
     data = response.json()
     assert "connected" in data
-    assert "default_collection" in data
-    assert data["default_collection"] == "LegalDocument"
+    assert data["default_collection"] == "LegalChunk"
+
 
 
 @pytest.mark.asyncio
