@@ -18,25 +18,12 @@ services:
     startCommand: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/v1/health
     envVars:
+      # Link your Render Environment Group named 'prod'
+      - fromGroup: prod
+      # Default fallback values if not present in the group
+      - key: PORT
+        value: "10000"
       - key: ENVIRONMENT
         value: production
-      - key: DEBUG
-        value: "false"
-      - key: JWT_SECRET_KEY
-        generateValue: true
-      - key: JWT_ALGORITHM
-        value: HS256
-      - key: ACCESS_TOKEN_EXPIRE_MINUTES
-        value: "60"
       - key: CORS_ORIGINS
         value: "*"
-      # Your existing cloud PostgreSQL connection string (Supabase, Neon, Render Postgres, etc.)
-      # Render will prompt for this value during blueprint creation
-      - key: DATABASE_URL
-        sync: false
-      # Weaviate Cloud Services (WCS) free sandbox cluster credentials:
-      # Obtain from: https://console.weaviate.cloud/
-      - key: WEAVIATE_URL
-        sync: false
-      - key: WEAVIATE_API_KEY
-        sync: false
