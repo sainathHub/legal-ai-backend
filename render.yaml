@@ -1,0 +1,53 @@
+# ==============================================================================
+# Render.com Blueprint Specification
+# Deploy with 1-click on Render: https://render.com/docs/blueprint-spec
+# ==============================================================================
+version: "1"
+
+services:
+  # ----------------------------------------------------------------------------
+  # FastAPI Web Service (Free Tier)
+  # ----------------------------------------------------------------------------
+  - type: web
+    name: legal-ai-backend
+    runtime: python
+    plan: free
+    region: oregon # or ohio, frankfurt, singapore
+    branch: main
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG
+        value: "false"
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "60"
+      - key: CORS_ORIGINS
+        value: "*"
+      # Link to the Render PostgreSQL database below (or provide external like Supabase)
+      - key: DATABASE_URL
+        fromDatabase:
+          name: legal-ai-postgres
+          property: connectionString
+      # Weaviate Cloud Services (WCS) free sandbox cluster credentials:
+      # Obtain from: https://console.weaviate.cloud/
+      - key: WEAVIATE_URL
+        sync: false
+      - key: WEAVIATE_API_KEY
+        sync: false
+
+# ------------------------------------------------------------------------------
+# PostgreSQL Database (Render Free Tier)
+# ------------------------------------------------------------------------------
+databases:
+  - name: legal-ai-postgres
+    plan: free
+    databaseName: legal_ai_db
+    user: postgres
+    region: oregon
