@@ -30,24 +30,13 @@ services:
         value: "60"
       - key: CORS_ORIGINS
         value: "*"
-      # Link to the Render PostgreSQL database below (or provide external like Supabase)
+      # Your existing cloud PostgreSQL connection string (Supabase, Neon, Render Postgres, etc.)
+      # Render will prompt for this value during blueprint creation
       - key: DATABASE_URL
-        fromDatabase:
-          name: legal-ai-postgres
-          property: connectionString
+        sync: false
       # Weaviate Cloud Services (WCS) free sandbox cluster credentials:
       # Obtain from: https://console.weaviate.cloud/
       - key: WEAVIATE_URL
         sync: false
       - key: WEAVIATE_API_KEY
         sync: false
-
-# ------------------------------------------------------------------------------
-# PostgreSQL Database (Render Free Tier)
-# ------------------------------------------------------------------------------
-databases:
-  - name: legal-ai-postgres
-    plan: free
-    databaseName: legal_ai_db
-    user: postgres
-    region: oregon
