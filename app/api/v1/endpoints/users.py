@@ -1,9 +1,10 @@
+import uuid
 from typing import Annotated, List
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.deps import get_current_active_superuser, get_current_active_user, get_db
+from app.core.deps import get_current_active_user, get_db
 from app.core.security import get_password_hash
 from app.models.user import User
 from app.schemas.user import UserRead, UserUpdate
@@ -18,7 +19,7 @@ async def update_my_profile(
     db: AsyncSession = Depends(get_db),
 ) -> User:
     """
-    Update the authenticated user's own profile information.
+    Update the authenticated user's own profile information (name, Bar Council ID, password, email).
     """
     if user_in.email is not None and user_in.email != current_user.email:
         # Check if email is already taken
@@ -33,8 +34,11 @@ async def update_my_profile(
     if user_in.full_name is not None:
         current_user.full_name = user_in.full_name
 
+    if user_in.bar_council_id is not None:
+        current_user.bar_council_id = user_in.bar_council_id
+
     if user_in.password is not None:
-        current_user.hashed_password = get_password_hash(user_in.password)
+        current_user.password_hash = get_password_hash(user_in.password)
 
     db.add(current_user)
     await db.commit()
@@ -46,11 +50,11 @@ async def update_my_profile(
 async def list_users(
     skip: int = 0,
     limit: int = 50,
-    _: Annotated[User, Depends(get_current_active_superuser)] = None,
+    current_user: Annotated[User, Depends(get_current_active_user)] = None,
     db: AsyncSession = Depends(get_db),
 ) -> List[User]:
     """
-    List all registered users. Restricted to administrators/superusers.
+    List registered users.
     """
     result = await db.execute(select(User).offset(skip).limit(limit))
     return list(result.scalars().all())
@@ -58,12 +62,12 @@ async def list_users(
 
 @router.get("/{user_id}", response_model=UserRead)
 async def get_user_by_id(
-    user_id: str,
-    _: Annotated[User, Depends(get_current_active_superuser)] = None,
+    user_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_active_user)] = None,
     db: AsyncSession = Depends(get_db),
 ) -> User:
     """
-    Get user profile by UUID. Restricted to administrators/superusers.
+    Get user profile by UUID.
     """
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()

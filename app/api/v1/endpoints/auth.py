@@ -21,7 +21,7 @@ async def register(
     db: AsyncSession = Depends(get_db),
 ) -> User:
     """
-    Register a new user with email and password.
+    Register a new lawyer/user with email, password, full name, and optional Bar Council ID.
     Hashes password securely with Argon2/Bcrypt and saves to PostgreSQL.
     """
     result = await db.execute(select(User).where(User.email == user_in.email.lower()))
@@ -34,10 +34,9 @@ async def register(
 
     user = User(
         email=user_in.email.lower(),
-        hashed_password=get_password_hash(user_in.password),
+        password_hash=get_password_hash(user_in.password),
         full_name=user_in.full_name,
-        is_active=True,
-        is_superuser=False,
+        bar_council_id=user_in.bar_council_id,
     )
     db.add(user)
     await db.commit()
@@ -57,21 +56,15 @@ async def login(
     result = await db.execute(select(User).where(User.email == login_data.email.lower()))
     user = result.scalar_one_or_none()
 
-    if not user or not verify_password(login_data.password, user.hashed_password):
+    if not user or not verify_password(login_data.password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User account is inactive",
-        )
-
     access_token = create_access_token(
-        subject=user.id,
+        subject=str(user.id),
         expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
     )
     return Token(access_token=access_token, token_type="bearer")
@@ -88,21 +81,15 @@ async def login_oauth(
     result = await db.execute(select(User).where(User.email == form_data.username.lower()))
     user = result.scalar_one_or_none()
 
-    if not user or not verify_password(form_data.password, user.hashed_password):
+    if not user or not verify_password(form_data.password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username/email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User account is inactive",
-        )
-
     access_token = create_access_token(
-        subject=user.id,
+        subject=str(user.id),
         expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
     )
     return Token(access_token=access_token, token_type="bearer")

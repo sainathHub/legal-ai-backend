@@ -4,27 +4,34 @@ from httpx import AsyncClient
 
 @pytest.mark.asyncio
 async def test_user_registration_and_login_flow(client: AsyncClient):
-    """Test full registration, authentication, and profile retrieval cycle."""
+    """Test full registration, authentication, and profile retrieval cycle with Bar Council ID."""
     email = "lawyer@example.com"
     password = "SuperSecretPassword123"
     full_name = "Jane Doe, Esq."
+    bar_council_id = "D/1234/2020"
 
     # 1. Register
     register_res = await client.post(
         "/api/v1/auth/register",
-        json={"email": email, "password": password, "full_name": full_name},
+        json={
+            "email": email,
+            "password": password,
+            "full_name": full_name,
+            "bar_council_id": bar_council_id,
+        },
     )
     assert register_res.status_code == 201
     user_data = register_res.json()
     assert user_data["email"] == email
     assert user_data["full_name"] == full_name
-    assert "hashed_password" not in user_data
+    assert user_data["bar_council_id"] == bar_council_id
+    assert "password_hash" not in user_data
     assert "id" in user_data
 
     # 2. Duplicate registration should fail with 400
     dup_res = await client.post(
         "/api/v1/auth/register",
-        json={"email": email, "password": password},
+        json={"email": email, "password": password, "full_name": full_name},
     )
     assert dup_res.status_code == 400
     assert "already exists" in dup_res.json()["detail"]
@@ -58,15 +65,17 @@ async def test_user_registration_and_login_flow(client: AsyncClient):
     profile = me_res.json()
     assert profile["email"] == email
     assert profile["full_name"] == full_name
+    assert profile["bar_council_id"] == bar_council_id
 
     # 7. Update profile
     update_res = await client.patch(
         "/api/v1/users/me",
         headers=auth_headers,
-        json={"full_name": "Jane Senior Partner"},
+        json={"full_name": "Jane Senior Partner", "bar_council_id": "D/5678/2021"},
     )
     assert update_res.status_code == 200
     assert update_res.json()["full_name"] == "Jane Senior Partner"
+    assert update_res.json()["bar_council_id"] == "D/5678/2021"
 
 
 @pytest.mark.asyncio
@@ -74,11 +83,12 @@ async def test_oauth2_form_login(client: AsyncClient):
     """Test OAuth2 form login used by Swagger UI."""
     email = "paralegal@example.com"
     password = "AnotherSecurePassword123"
+    full_name = "Alex Senior Paralegal"
 
     # Register
     await client.post(
         "/api/v1/auth/register",
-        json={"email": email, "password": password},
+        json={"email": email, "password": password, "full_name": full_name},
     )
 
     # Form login

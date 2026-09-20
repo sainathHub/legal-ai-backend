@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
@@ -5,8 +6,8 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 class UserBase(BaseModel):
     email: EmailStr
-    full_name: Optional[str] = None
-    is_active: Optional[bool] = True
+    full_name: str = Field(..., min_length=1, max_length=100, description="Full name of lawyer / user")
+    bar_council_id: Optional[str] = Field(None, max_length=50, description="Bar Council Enrollment ID (e.g., D/1234/2020)")
 
 
 class UserCreate(UserBase):
@@ -15,14 +16,13 @@ class UserCreate(UserBase):
 
 class UserUpdate(BaseModel):
     email: Optional[EmailStr] = None
-    full_name: Optional[str] = None
+    full_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    bar_council_id: Optional[str] = Field(None, max_length=50)
     password: Optional[str] = Field(None, min_length=8)
-    is_active: Optional[bool] = None
 
 
 class UserRead(UserBase):
-    id: str
-    is_superuser: bool
+    id: uuid.UUID
     created_at: datetime
     updated_at: datetime
 
