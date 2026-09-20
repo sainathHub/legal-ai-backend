@@ -1,4 +1,6 @@
 import asyncio
+import os
+import re
 from logging.config import fileConfig
 
 from alembic import context
@@ -22,23 +24,28 @@ if config.config_file_name is not None:
 # for 'autogenerate' support
 target_metadata = Base.metadata
 
+
 def get_url() -> str:
-    """Return database connection URL from application settings."""
-    return settings.DATABASE_URL
+    """Return database connection URL from application settings with diagnostic logging."""
+    url = settings.DATABASE_URL
+    masked_url = re.sub(r':([^:@]+)@', ':****@', url) if url else "EMPTY"
+    
+    if not url or "localhost:5432" in url:
+        if settings.ENVIRONMENT == "production" or os.environ.get("RENDER"):
+            print(
+                f"\n⚠️ [Alembic Error] DATABASE_URL is pointing to localhost ({masked_url})!\n"
+                "   This means Render does NOT have your DATABASE_URL environment variable.\n"
+                "   Please link your 'prod' Environment Group or add DATABASE_URL in your Web Service settings!\n",
+                flush=True,
+            )
+    else:
+        print(f"--> [Alembic] Connecting to database: {masked_url}", flush=True)
+        
+    return url
 
 
 def run_migrations_offline() -> None:
-    """Run migrations in 'offline' mode.
-
-    This configures the context with just a URL
-    and not an Engine, though an Engine is acceptable
-    here as well.  By skipping the Engine creation
-    we don't even need a DBAPI to be available.
-
-    Calls to context.execute() here emit the given string to the
-    script output.
-
-    """
+    """Run migrations in 'offline' mode."""
     url = get_url()
     context.configure(
         url=url,
@@ -61,7 +68,6 @@ def do_run_migrations(connection: Connection) -> None:
 async def run_async_migrations() -> None:
     """In this scenario we need to create an Engine
     and associate a connection with the context.
-
     """
     configuration = config.get_section(config.config_ini_section, {})
     configuration["sqlalchemy.url"] = get_url()
