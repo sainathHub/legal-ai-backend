@@ -82,6 +82,9 @@ async def search_vectors(
     Requires user authentication.
     """
     if not weaviate_manager.is_connected():
+        weaviate_manager.connect()
+
+    if not weaviate_manager.is_connected():
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Weaviate vector database is not connected or configured.",

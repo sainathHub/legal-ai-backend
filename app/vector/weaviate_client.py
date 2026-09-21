@@ -19,6 +19,67 @@ from app.schemas.vector import (
 logger = logging.getLogger("legal_ai.vector")
 
 
+_embed_model = None
+
+
+def get_query_vector(text: str) -> Optional[List[float]]:
+    """Generate 384-dimensional embedding for the search query using sentence-transformers/all-MiniLM-L6-v2."""
+    global _embed_model
+    try:
+        from fastembed import TextEmbedding
+
+        if _embed_model is None:
+            _embed_model = TextEmbedding("sentence-transformers/all-MiniLM-L6-v2")
+        embeddings = list(_embed_model.embed([text]))
+        return embeddings[0].tolist()
+    except Exception as e:
+        logger.warning("Could not generate query embedding with fastembed: %s", e)
+        return None
+
+
+def _parse_weaviate_object_to_item(obj: Any) -> VectorSearchResultItem:
+    """Extract standard properties and metadata from Weaviate object supporting LegalChunk and generic collections."""
+    props = obj.properties or {}
+    meta: Dict[str, Any] = {}
+
+    raw_meta = props.get("metadata_json")
+    if raw_meta and isinstance(raw_meta, str):
+        try:
+            meta = json.loads(raw_meta)
+        except Exception:
+            meta = {"raw": raw_meta}
+
+    # Extract standard Indian legal dataset properties from LegalChunk
+    for k in ["case_title", "court_name", "case_type", "decision_date", "year", "doc_url", "influence_score"]:
+        if k in props and props[k] is not None:
+            meta[k] = props[k]
+
+    if "doc_url" in props and "source_url" not in meta:
+        meta["source_url"] = props["doc_url"]
+
+    title = props.get("case_title") or props.get("title") or "Precedent Judgment"
+    content = props.get("chunk_text") or props.get("content") or ""
+    doc_id = props.get("doc_id") or (str(props.get("year")) if props.get("year") else None)
+    chunk_index = props.get("chunk_index")
+
+    score = None
+    distance = None
+    if obj.metadata:
+        score = getattr(obj.metadata, "score", None)
+        distance = getattr(obj.metadata, "distance", None)
+
+    return VectorSearchResultItem(
+        id=str(obj.uuid),
+        doc_id=doc_id,
+        chunk_index=chunk_index,
+        title=title,
+        content=content,
+        metadata=meta,
+        score=score,
+        distance=distance,
+    )
+
+
 class WeaviateClientManager:
     """Manager for Weaviate v4 client connection, schema lifecycle, and vector search."""
 
@@ -46,6 +107,7 @@ class WeaviateClientManager:
                     cluster_url=url,
                     auth_credentials=auth,
                     headers=headers if headers else None,
+                    skip_init_checks=True,
                 )
             # Case 2: Localhost or Custom Host (Docker / Kubernetes)
             else:
@@ -53,7 +115,7 @@ class WeaviateClientManager:
                 host = parsed.hostname or "localhost"
                 port = parsed.port or (443 if parsed.scheme == "https" else 8080)
                 is_secure = parsed.scheme == "https"
-                
+
                 auth = Auth.api_key(settings.WEAVIATE_API_KEY) if settings.WEAVIATE_API_KEY else None
                 self.client = weaviate.connect_to_custom(
                     http_host=host,
@@ -104,7 +166,7 @@ class WeaviateClientManager:
             return False
 
     def ensure_default_collections(self) -> None:
-        """Ensure default collections (e.g. LegalDocument) exist with proper schema."""
+        """Ensure default collection (e.g. LegalChunk) exists with proper schema."""
         if not self.is_connected() or not self.client:
             return
 
@@ -162,38 +224,48 @@ class WeaviateClientManager:
 
         items: List[VectorSearchResultItem] = []
 
-        # 1. Hybrid Search (when query text is provided)
+        # 1. Text Query Provided
         if query.query:
-            response = collection.query.hybrid(
-                query=query.query,
-                vector=query.vector,
-                alpha=query.alpha,
-                limit=query.limit,
-                filters=filters,
-                return_metadata=MetadataQuery(score=True, distance=True),
-            )
-            for obj in response.objects:
-                meta = {}
-                raw_meta = obj.properties.get("metadata_json")
-                if raw_meta and isinstance(raw_meta, str):
-                    try:
-                        meta = json.loads(raw_meta)
-                    except Exception:
-                        meta = {"raw": raw_meta}
+            query_text = query.query.strip()
+            query_vec = query.vector
 
-                items.append(
-                    VectorSearchResultItem(
-                        id=str(obj.uuid),
-                        doc_id=obj.properties.get("doc_id"),
-                        chunk_index=obj.properties.get("chunk_index"),
-                        title=obj.properties.get("title"),
-                        content=obj.properties.get("content"),
-                        metadata=meta,
-                        score=obj.metadata.score if obj.metadata else None,
-                        distance=obj.metadata.distance if obj.metadata else None,
+            # If alpha > 0 and no vector provided, attempt to compute vector via fastembed
+            if query_vec is None and query.alpha > 0:
+                query_vec = get_query_vector(query_text)
+
+            # Try hybrid search if vector is available and alpha > 0
+            if query_vec is not None and query.alpha > 0:
+                try:
+                    response = collection.query.hybrid(
+                        query=query_text,
+                        vector=query_vec,
+                        alpha=query.alpha,
+                        limit=query.limit,
+                        filters=filters,
+                        return_metadata=MetadataQuery(score=True, distance=True),
                     )
-                )
-        # 2. Pure Vector Search (when only vector is provided)
+                    items = [_parse_weaviate_object_to_item(obj) for obj in response.objects]
+                except Exception as e:
+                    logger.warning("Hybrid search failed (%s), falling back to BM25 keyword search.", e)
+                    items = []
+
+            # If hybrid produced no items or alpha == 0 or vector generation was skipped, use BM25
+            if not items:
+                try:
+                    search_props = ["chunk_text", "case_title"] if coll_name == "LegalChunk" else ["content", "title"]
+                    response = collection.query.bm25(
+                        query=query_text,
+                        query_properties=search_props,
+                        limit=query.limit,
+                        filters=filters,
+                        return_metadata=MetadataQuery(score=True),
+                    )
+                    items = [_parse_weaviate_object_to_item(obj) for obj in response.objects]
+                except Exception as e:
+                    logger.error("BM25 keyword search failed: %s", e)
+                    raise
+
+        # 2. Pure Vector Search (only vector provided)
         elif query.vector:
             response = collection.query.near_vector(
                 near_vector=query.vector,
@@ -201,26 +273,7 @@ class WeaviateClientManager:
                 filters=filters,
                 return_metadata=MetadataQuery(distance=True),
             )
-            for obj in response.objects:
-                meta = {}
-                raw_meta = obj.properties.get("metadata_json")
-                if raw_meta and isinstance(raw_meta, str):
-                    try:
-                        meta = json.loads(raw_meta)
-                    except Exception:
-                        meta = {"raw": raw_meta}
-
-                items.append(
-                    VectorSearchResultItem(
-                        id=str(obj.uuid),
-                        doc_id=obj.properties.get("doc_id"),
-                        chunk_index=obj.properties.get("chunk_index"),
-                        title=obj.properties.get("title"),
-                        content=obj.properties.get("content"),
-                        metadata=meta,
-                        distance=obj.metadata.distance if obj.metadata else None,
-                    )
-                )
+            items = [_parse_weaviate_object_to_item(obj) for obj in response.objects]
 
         return VectorSearchResponse(
             total_results=len(items),

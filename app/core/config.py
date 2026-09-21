@@ -79,6 +79,10 @@ class Settings(BaseSettings):
     # Collection Name for Vector Storage (matches user's Weaviate instance collection)
     DEFAULT_VECTOR_COLLECTION: str = "LegalChunk"
 
+    # Groq LLM Configuration
+    GROQ_API_KEY: str = ""
+    GROQ_DEFAULT_MODEL: str = "qwen/qwen3.8-27b"
+
 
 
 settings = Settings()

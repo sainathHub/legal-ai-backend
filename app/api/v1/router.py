@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.v1.endpoints import auth, health, projects, threads, users, vectors
+from app.api.v1.endpoints import auth, health, projects, rag, threads, users, vectors
 
 api_router = APIRouter()
 
@@ -10,3 +10,4 @@ api_router.include_router(users.router, prefix="/users", tags=["Users"])
 api_router.include_router(projects.router, prefix="/projects", tags=["Cases / Projects"])
 api_router.include_router(threads.router, prefix="", tags=["Chat Threads"])
 api_router.include_router(vectors.router, prefix="/vectors", tags=["Vectors"])
+api_router.include_router(rag.router, prefix="/rag", tags=["Legal RAG & Advisory"])

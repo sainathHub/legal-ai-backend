@@ -19,8 +19,10 @@ pyjwt[crypto]>=2.10.0
 pwdlib[argon2,bcrypt]>=0.2.1
 python-multipart>=0.0.18
 
-# Vector Database
+# Vector Database & LLM RAG
 weaviate-client>=4.10.0
+groq>=1.2.0
+fastembed>=0.8.0
 
 # HTTP & Testing
 httpx>=0.28.0

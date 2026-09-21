@@ -10,6 +10,8 @@ from app.schemas.vector import (
     VectorSearchResponse,
 )
 
+from app.schemas.rag import LegalRAGRequest, LegalRAGResponse
+
 __all__ = [
     "UserBase",
     "UserCreate",
@@ -32,4 +34,6 @@ __all__ = [
     "VectorSearchQuery",
     "VectorSearchResultItem",
     "VectorSearchResponse",
+    "LegalRAGRequest",
+    "LegalRAGResponse",
 ]
