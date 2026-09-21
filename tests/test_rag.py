@@ -1,6 +1,7 @@
+import uuid
 import pytest
 from httpx import AsyncClient
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 from app.schemas.rag import LegalRAGRequest, LegalRAGResponse
 from app.schemas.vector import VectorSearchResultItem
@@ -35,10 +36,12 @@ def test_rag_schemas():
         precedents_count=1,
         precedents=[item],
         search_mode_used="hybrid",
+        standalone_query="Anticipatory bail guidelines",
         execution_time_ms=123.45,
     )
     assert resp.precedents_count == 1
     assert resp.precedents[0].title == "State of Haryana vs Bhajan Lal"
+    assert resp.standalone_query == "Anticipatory bail guidelines"
     assert resp.execution_time_ms == 123.45
 
 
@@ -86,7 +89,6 @@ async def test_rag_requires_authentication(client: AsyncClient):
 @pytest.mark.asyncio
 async def test_rag_models_endpoint_authenticated(client: AsyncClient):
     """Verify /api/v1/rag/models returns default model and list when authenticated."""
-    # Register & login
     email = "advocate.rag@example.com"
     password = "SecurePassword123!"
     await client.post(
@@ -135,7 +137,7 @@ async def test_rag_query_endpoint_mocked(client: AsyncClient):
         execution_time_ms=85.0,
     )
 
-    with patch.object(legal_rag_service, "execute_rag", return_value=mock_response):
+    with patch.object(legal_rag_service, "execute_rag", new_callable=AsyncMock, return_value=mock_response):
         res = await client.post(
             "/api/v1/rag/query",
             json={"query": "Article 21 privacy rights", "limit": 1},
@@ -146,3 +148,33 @@ async def test_rag_query_endpoint_mocked(client: AsyncClient):
         assert data["query"] == "Article 21 privacy rights"
         assert "Puttaswamy" in data["precedents"][0]["title"]
         assert "Direct Legal Opinion" in data["answer"]
+
+
+@pytest.mark.asyncio
+async def test_thread_messages_lifecycle(client: AsyncClient):
+    """Verify creating a project, thread, retrieving and clearing message history."""
+    email = "advocate.thread@example.com"
+    password = "SecurePassword123!"
+    await client.post(
+        "/api/v1/auth/register",
+        json={"email": email, "password": password, "full_name": "Advocate Thread Messages"},
+    )
+    login_res = await client.post("/api/v1/auth/login", json={"email": email, "password": password})
+    token = login_res.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # 1. Create project & thread
+    proj_res = await client.post("/api/v1/projects/", json={"title": "Test Case"}, headers=headers)
+    proj_id = proj_res.json()["id"]
+
+    thr_res = await client.post(f"/api/v1/projects/{proj_id}/threads", json={"title": "Bail Research"}, headers=headers)
+    thr_id = thr_res.json()["id"]
+
+    # 2. Get messages (empty initially)
+    msgs_res = await client.get(f"/api/v1/threads/{thr_id}/messages", headers=headers)
+    assert msgs_res.status_code == 200
+    assert msgs_res.json() == []
+
+    # 3. Clear messages endpoint
+    del_res = await client.delete(f"/api/v1/threads/{thr_id}/messages", headers=headers)
+    assert del_res.status_code == 204

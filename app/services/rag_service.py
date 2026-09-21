@@ -1,13 +1,21 @@
 import json
 import logging
 import time
-from typing import AsyncGenerator, Dict, List, Optional, Tuple
+import uuid
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 import weaviate.classes.query as wq
 from fastapi import HTTPException, status
-from groq import Groq
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_groq import ChatGroq
 
 from app.core.config import settings
+from app.models.message import Message
 from app.schemas.rag import LegalRAGRequest, LegalRAGResponse
 from app.schemas.vector import VectorSearchResultItem
 from app.vector.weaviate_client import (
@@ -18,7 +26,13 @@ from app.vector.weaviate_client import (
 
 logger = logging.getLogger("legal_ai.rag")
 
-SYSTEM_LEGAL_PROMPT = (
+CONTEXTUALIZE_Q_SYSTEM_PROMPT = (
+    "Given a chat history and the latest user question which might reference context in the chat history, "
+    "formulate a standalone legal question which can be understood without the chat history. "
+    "Do NOT answer the question, just reformulate it if needed and otherwise return it as is."
+)
+
+LEGAL_QA_SYSTEM_PROMPT = (
     "You are an elite Indian Supreme Court and High Court Legal Advisory AI. "
     "Your role is to formulate precise, authoritative, and structured legal analysis for Indian lawyers.\n\n"
     "Guidelines:\n"
@@ -35,19 +49,74 @@ SYSTEM_LEGAL_PROMPT = (
 
 
 class LegalRAGService:
-    """Service to execute end-to-end Indian Legal RAG queries via Weaviate Cloud and Groq LLM."""
+    """Conversational Indian Legal RAG Service powered by LangChain, Weaviate Cloud, and PostgreSQL."""
 
     def __init__(self) -> None:
         self.collection_name = settings.DEFAULT_VECTOR_COLLECTION
 
-    def _get_groq_client(self) -> Groq:
+    def _get_api_key(self) -> str:
         api_key = settings.GROQ_API_KEY.strip() if settings.GROQ_API_KEY else ""
         if not api_key:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="GROQ_API_KEY is not configured on the backend server. Please set it in .env.",
             )
-        return Groq(api_key=api_key)
+        return api_key
+
+    async def load_chat_history(
+        self, thread_id: uuid.UUID, db: AsyncSession
+    ) -> List[BaseMessage]:
+        """Load prior conversation turns for a thread from PostgreSQL."""
+        query = (
+            select(Message)
+            .where(Message.thread_id == thread_id)
+            .order_by(Message.created_at.asc())
+        )
+        result = await db.execute(query)
+        rows = result.scalars().all()
+
+        chat_history: List[BaseMessage] = []
+        for r in rows:
+            if r.role == "user":
+                chat_history.append(HumanMessage(content=r.content))
+            elif r.role == "assistant":
+                chat_history.append(AIMessage(content=r.content))
+            elif r.role == "system":
+                chat_history.append(SystemMessage(content=r.content))
+        return chat_history
+
+    async def contextualize_question(
+        self,
+        query: str,
+        chat_history: List[BaseMessage],
+        model: str,
+        api_key: str,
+    ) -> str:
+        """Reformulate follow-up queries using conversation history to make them standalone for Weaviate."""
+        if not chat_history:
+            return query
+
+        try:
+            condense_llm = ChatGroq(
+                model=model,
+                groq_api_key=api_key,
+                temperature=0.0,
+                max_tokens=150,
+            )
+            prompt = ChatPromptTemplate.from_messages(
+                [
+                    ("system", CONTEXTUALIZE_Q_SYSTEM_PROMPT),
+                    MessagesPlaceholder("chat_history"),
+                    ("human", "{input}"),
+                ]
+            )
+            chain = prompt | condense_llm | StrOutputParser()
+            reformulated = await chain.ainvoke({"chat_history": chat_history, "input": query})
+            cleaned = reformulated.strip().strip("\"'")
+            return cleaned if cleaned else query
+        except Exception as e:
+            logger.warning("Query contextualization failed (%s), falling back to raw query.", e)
+            return query
 
     def retrieve_precedents(
         self,
@@ -163,42 +232,108 @@ class LegalRAGService:
 
         return "\n" + ("=" * 50) + "\n" + "\n".join(formatted_parts)
 
-    def execute_rag(self, req: LegalRAGRequest) -> LegalRAGResponse:
-        """Synchronous end-to-end Legal RAG query returning full synthesis and citations."""
-        t0 = time.time()
+    def _prepare_clean_sources(
+        self, precedents: List[VectorSearchResultItem]
+    ) -> List[Dict[str, Any]]:
+        """Normalize precedent items into serializable JSON sources for database persistence."""
+        clean_sources = []
+        for p in precedents:
+            clean_sources.append(
+                {
+                    "case_title": p.title,
+                    "court_name": p.metadata.get("court_name", "Indian Court"),
+                    "decision_date": p.metadata.get("decision_date") or str(p.metadata.get("year", "")),
+                    "case_type": p.metadata.get("case_type", "General"),
+                    "influence_score": p.metadata.get("influence_score", 0),
+                    "doc_url": p.metadata.get("source_url") or p.metadata.get("doc_url", ""),
+                    "score": p.score,
+                    "distance": p.distance,
+                    "excerpt": (p.content or "")[:200],
+                }
+            )
+        return clean_sources
 
+    async def execute_rag(
+        self, req: LegalRAGRequest, db: Optional[AsyncSession] = None
+    ) -> LegalRAGResponse:
+        """End-to-end Conversational Legal RAG turn with LangChain & PostgreSQL persistence."""
+        t0 = time.time()
+        api_key = self._get_api_key()
+        model = req.model or settings.GROQ_DEFAULT_MODEL
+
+        # 1. Load Conversation History from PostgreSQL if thread_id provided
+        chat_history: List[BaseMessage] = []
+        if req.thread_id and db:
+            chat_history = await self.load_chat_history(req.thread_id, db)
+
+        # 2. Contextualize user question using chat history
+        standalone_query = req.query
+        if chat_history:
+            standalone_query = await self.contextualize_question(
+                query=req.query,
+                chat_history=chat_history,
+                model=model,
+                api_key=api_key,
+            )
+
+        # 3. Retrieve precedents from Weaviate Cloud using standalone query
         precedents, actual_mode = self.retrieve_precedents(
-            query=req.query,
+            query=standalone_query,
             limit=req.limit,
             case_type=req.case_type,
             min_year=req.min_year,
             search_mode=req.search_mode,
         )
 
-        context = self.format_context_block(precedents)
-        user_prompt = f"Query / Case Facts:\n{req.query}\n\nRetrieved Case Law Context:\n{context}"
+        context_block = self.format_context_block(precedents)
 
-        model = req.model or settings.GROQ_DEFAULT_MODEL
-        groq_client = self._get_groq_client()
-
+        # 4. Synthesize Legal Advisory Opinion with LangChain ChatGroq
         try:
-            completion = groq_client.chat.completions.create(
+            llm = ChatGroq(
                 model=model,
-                messages=[
-                    {"role": "system", "content": SYSTEM_LEGAL_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
+                groq_api_key=api_key,
                 temperature=0.1,
                 max_tokens=req.max_tokens,
-                stream=False,
             )
-            answer = completion.choices[0].message.content or ""
+            qa_prompt = ChatPromptTemplate.from_messages(
+                [
+                    ("system", LEGAL_QA_SYSTEM_PROMPT),
+                    MessagesPlaceholder("chat_history"),
+                    ("human", "Query / Case Facts:\n{input}\n\nRetrieved Case Law Context:\n{context}"),
+                ]
+            )
+            chain = qa_prompt | llm | StrOutputParser()
+            answer = await chain.ainvoke(
+                {
+                    "chat_history": chat_history,
+                    "input": req.query,
+                    "context": context_block,
+                }
+            )
         except Exception as e:
-            logger.error("Groq generation failed for model %s: %s", model, e)
+            logger.error("LangChain Groq generation failed for model %s: %s", model, e)
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=f"Groq LLM generation failed: {str(e)}",
             )
+
+        # 5. Persist Conversation Turn into PostgreSQL if thread_id and db are present
+        clean_sources = self._prepare_clean_sources(precedents)
+        if req.thread_id and db:
+            user_msg = Message(
+                thread_id=req.thread_id,
+                role="user",
+                content=req.query,
+                sources=[],
+            )
+            ai_msg = Message(
+                thread_id=req.thread_id,
+                role="assistant",
+                content=answer,
+                sources=clean_sources,
+            )
+            db.add_all([user_msg, ai_msg])
+            await db.commit()
 
         elapsed_ms = round((time.time() - t0) * 1000, 2)
 
@@ -209,66 +344,123 @@ class LegalRAGService:
             precedents_count=len(precedents),
             precedents=precedents,
             search_mode_used=actual_mode,
+            standalone_query=standalone_query if standalone_query != req.query else None,
             execution_time_ms=elapsed_ms,
         )
 
     async def stream_rag_opinion(
-        self, req: LegalRAGRequest
+        self, req: LegalRAGRequest, db: Optional[AsyncSession] = None
     ) -> AsyncGenerator[str, None]:
-        """Stream SSE chunks for real-time drafting in the legal console."""
+        """Stream SSE chunks for real-time drafting in the legal console with DB persistence."""
         t0 = time.time()
+        api_key = self._get_api_key()
+        model = req.model or settings.GROQ_DEFAULT_MODEL
 
+        # 1. Load History
+        chat_history: List[BaseMessage] = []
+        if req.thread_id and db:
+            chat_history = await self.load_chat_history(req.thread_id, db)
+
+        # Status: contextualizing
+        if chat_history:
+            yield f"event: status\ndata: {json.dumps({'stage': 'contextualizing', 'message': 'Evaluating dialogue history...'})}\n\n"
+
+        # 2. Contextualize query
+        standalone_query = req.query
+        if chat_history:
+            standalone_query = await self.contextualize_question(
+                query=req.query,
+                chat_history=chat_history,
+                model=model,
+                api_key=api_key,
+            )
+
+        # Status: searching
+        yield f"event: status\ndata: {json.dumps({'stage': 'searching', 'standalone_query': standalone_query})}\n\n"
+
+        # 3. Retrieve precedents from Weaviate Cloud
         precedents, actual_mode = self.retrieve_precedents(
-            query=req.query,
+            query=standalone_query,
             limit=req.limit,
             case_type=req.case_type,
             min_year=req.min_year,
             search_mode=req.search_mode,
         )
 
-        # First emit precedents metadata event
         precedents_data = [p.model_dump() for p in precedents]
         init_event = {
             "type": "precedents",
             "search_mode": actual_mode,
             "precedents_count": len(precedents),
+            "standalone_query": standalone_query,
             "precedents": precedents_data,
         }
         yield f"event: precedents\ndata: {json.dumps(init_event)}\n\n"
 
-        context = self.format_context_block(precedents)
-        user_prompt = f"Query / Case Facts:\n{req.query}\n\nRetrieved Case Law Context:\n{context}"
+        context_block = self.format_context_block(precedents)
 
-        model = req.model or settings.GROQ_DEFAULT_MODEL
-        groq_client = self._get_groq_client()
-
+        # 4. Stream response tokens via LangChain ChatGroq
         try:
-            stream = groq_client.chat.completions.create(
+            llm = ChatGroq(
                 model=model,
-                messages=[
-                    {"role": "system", "content": SYSTEM_LEGAL_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
+                groq_api_key=api_key,
                 temperature=0.1,
                 max_tokens=req.max_tokens,
-                stream=True,
+                streaming=True,
             )
+            qa_prompt = ChatPromptTemplate.from_messages(
+                [
+                    ("system", LEGAL_QA_SYSTEM_PROMPT),
+                    MessagesPlaceholder("chat_history"),
+                    ("human", "Query / Case Facts:\n{input}\n\nRetrieved Case Law Context:\n{context}"),
+                ]
+            )
+            chain = qa_prompt | llm
 
-            for chunk in stream:
-                content = chunk.choices[0].delta.content or ""
+            accumulated_tokens: List[str] = []
+            async for chunk in chain.astream(
+                {
+                    "chat_history": chat_history,
+                    "input": req.query,
+                    "context": context_block,
+                }
+            ):
+                content = chunk.content if isinstance(chunk.content, str) else str(chunk.content)
                 if content:
+                    accumulated_tokens.append(content)
                     yield f"event: token\ndata: {json.dumps({'delta': content})}\n\n"
+
+            full_answer = "".join(accumulated_tokens)
+
+            # 5. Persist to PostgreSQL
+            clean_sources = self._prepare_clean_sources(precedents)
+            if req.thread_id and db:
+                user_msg = Message(
+                    thread_id=req.thread_id,
+                    role="user",
+                    content=req.query,
+                    sources=[],
+                )
+                ai_msg = Message(
+                    thread_id=req.thread_id,
+                    role="assistant",
+                    content=full_answer,
+                    sources=clean_sources,
+                )
+                db.add_all([user_msg, ai_msg])
+                await db.commit()
 
             elapsed_ms = round((time.time() - t0) * 1000, 2)
             done_event = {
                 "type": "done",
                 "model_used": model,
+                "standalone_query": standalone_query if standalone_query != req.query else None,
                 "execution_time_ms": elapsed_ms,
             }
             yield f"event: done\ndata: {json.dumps(done_event)}\n\n"
 
         except Exception as e:
-            logger.error("Error during Groq streaming: %s", e)
+            logger.error("Error during LangChain Groq streaming: %s", e)
             error_event = {"type": "error", "error": str(e)}
             yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
 

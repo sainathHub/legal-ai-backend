@@ -11,6 +11,7 @@ from app.schemas.vector import (
 )
 
 from app.schemas.rag import LegalRAGRequest, LegalRAGResponse
+from app.schemas.message import MessageBase, MessageCreate, MessageRead
 
 __all__ = [
     "UserBase",
@@ -36,4 +37,7 @@ __all__ = [
     "VectorSearchResponse",
     "LegalRAGRequest",
     "LegalRAGResponse",
+    "MessageBase",
+    "MessageCreate",
+    "MessageRead",
 ]

@@ -61,4 +61,8 @@ class LegalRAGResponse(BaseModel):
         description="List of landmark Indian case precedents retrieved from Weaviate Cloud",
     )
     search_mode_used: str = Field(..., description="Actual retrieval mode employed (e.g., 'hybrid', 'bm25')")
+    standalone_query: Optional[str] = Field(
+        None,
+        description="Standalone legal search query synthesized from conversation history by LangChain",
+    )
     execution_time_ms: float = Field(..., description="Total pipeline latency in milliseconds")

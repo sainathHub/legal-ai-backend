@@ -21,8 +21,11 @@ python-multipart>=0.0.18
 
 # Vector Database & LLM RAG
 weaviate-client>=4.10.0
-groq>=1.2.0
+groq>=0.37.1
 fastembed>=0.8.0
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-groq>=0.2.0
 
 # HTTP & Testing
 httpx>=0.28.0

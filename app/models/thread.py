@@ -1,12 +1,13 @@
 import uuid
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, List
 from sqlalchemy import DateTime, ForeignKey, String, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 
 if TYPE_CHECKING:
     from app.models.project import Project
+    from app.models.message import Message
 
 
 class Thread(Base):
@@ -54,6 +55,12 @@ class Thread(Base):
     project: Mapped["Project"] = relationship(
         "Project",
         back_populates="threads",
+    )
+    messages: Mapped[List["Message"]] = relationship(
+        "Message",
+        back_populates="thread",
+        cascade="all, delete-orphan",
+        order_by="Message.created_at.asc()",
     )
 
     def __repr__(self) -> str:

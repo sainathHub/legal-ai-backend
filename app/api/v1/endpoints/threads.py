@@ -1,13 +1,15 @@
 import uuid
 from typing import Annotated, List
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_active_user, get_db
+from app.models.message import Message
 from app.models.project import Project
 from app.models.thread import Thread
 from app.models.user import User
+from app.schemas.message import MessageRead
 from app.schemas.thread import ThreadCreate, ThreadRead, ThreadUpdate
 
 router = APIRouter()
@@ -156,5 +158,61 @@ async def delete_thread(
         )
 
     await db.delete(thread)
+    await db.commit()
+    return None
+
+
+@router.get("/threads/{thread_id}/messages", response_model=List[MessageRead])
+async def get_thread_messages(
+    thread_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_active_user)],
+    db: AsyncSession = Depends(get_db),
+) -> List[Message]:
+    """
+    Retrieve all conversation messages and cited precedents in a thread in chronological order.
+    """
+    query = (
+        select(Thread)
+        .join(Project, Thread.project_id == Project.id)
+        .where(Thread.id == thread_id, Project.user_id == current_user.id)
+    )
+    result = await db.execute(query)
+    if not result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Chat thread not found or access denied",
+        )
+
+    msg_query = (
+        select(Message)
+        .where(Message.thread_id == thread_id)
+        .order_by(Message.created_at.asc())
+    )
+    msg_result = await db.execute(msg_query)
+    return list(msg_result.scalars().all())
+
+
+@router.delete("/threads/{thread_id}/messages", status_code=status.HTTP_204_NO_CONTENT)
+async def clear_thread_messages(
+    thread_id: uuid.UUID,
+    current_user: Annotated[User, Depends(get_current_active_user)],
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """
+    Clear all conversation messages in a thread while keeping the thread active.
+    """
+    query = (
+        select(Thread)
+        .join(Project, Thread.project_id == Project.id)
+        .where(Thread.id == thread_id, Project.user_id == current_user.id)
+    )
+    result = await db.execute(query)
+    if not result.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Chat thread not found or access denied",
+        )
+
+    await db.execute(delete(Message).where(Message.thread_id == thread_id))
     await db.commit()
     return None
